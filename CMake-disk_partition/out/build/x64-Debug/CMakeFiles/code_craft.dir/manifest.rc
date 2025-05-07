@@ -1,0 +1,2 @@
+#pragma code_page(65001)
+1 /* CREATEPROCESS_MANIFEST_RESOURCE_ID */ 24 /* RT_MANIFEST */ "D:/C_code/arraynew/CMake-disk_partition/out/build/x64-Debug/CMakeFiles/code_craft.dir/embed.manifest"

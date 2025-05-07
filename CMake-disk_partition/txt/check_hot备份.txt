@@ -1,0 +1,324 @@
+//2个热分区的版本
+friend void check_at_hot_tag(vector<DISK>& disks,
+    int hot_tag,
+    int hot_tag2,
+    int time,
+    const Request r[],
+    const vector<int>& req_tag)
+{
+    // 如果某个硬盘磁头已经在 hot_tag 的分区内，旧逻辑直接 return。
+    // 但我们还需要对 hot_tag2 做同样处理。
+    // 因此可以分开写：“检查 hot_tag 是否已有人在分区内”，“检查 hot_tag2 是否已有人在分区内”。
+    // 若想完全保持与原逻辑一致，可以先检查 hot_tag，再检查 hot_tag2，若二者都有磁头位于分区内，就都不做任何处理。
+
+    // 先定义一个小函数，用于判断“磁头是否在某标签的分区内”
+    auto headInTagPartition = [&](int diskIdx, int tag) {
+        if (disks[diskIdx].table.count(tag) == 0) return false;
+        auto range = disks[diskIdx].table.equal_range(tag);
+        for (auto it = range.first; it != range.second; ++it) {
+            // 若“磁头位置”在该分区 [begin, begin+length)，说明已在分区中
+            if (disks[diskIdx].head_idx >= it->second.begin
+                && disks[diskIdx].head_idx < it->second.begin + it->second.length)
+            {
+                return true;
+            }
+        }
+        return false;
+        };
+
+    // 检查是否有磁头已经位于 hot_tag 分区
+    bool anyDiskInHotTag = false;
+    for (int i = 0; i < (int)disks.size(); ++i) {
+        if (headInTagPartition(i, hot_tag)) {
+            anyDiskInHotTag = true;
+            break;
+        }
+    }
+
+    // 检查是否有磁头已经位于 hot_tag2 分区
+    bool anyDiskInHotTag2 = false;
+    for (int i = 0; i < (int)disks.size(); ++i) {
+        if (headInTagPartition(i, hot_tag2)) {
+            anyDiskInHotTag2 = true;
+            break;
+        }
+    }
+
+    // 如果某硬盘磁头当前所在分区是 tagX，则 ex = req_tag[tagX - 1]；若磁头不在任何分区，ex=0。
+    // 用此函数计算 ex
+    auto getEx = [&](int diskIdx) {
+        // 找出该磁头现在处于哪个 tag 分区
+        int exVal = 0;
+        // 注意：同一个磁头只会处在 table 里某个分区(或没有分区)，所以只要找到一个就 break
+        for (auto it = disks[diskIdx].table.begin(); it != disks[diskIdx].table.end(); ++it) {
+            if (disks[diskIdx].head_idx >= it->second.begin
+                && disks[diskIdx].head_idx < it->second.begin + it->second.length)
+            {
+                if (it->second.shared == nullptr)
+                    exVal = req_tag[it->first - 1];
+                else
+                    exVal = req_tag[it->first - 1] + req_tag[it->second.shared->key - 1];
+                break;
+            }
+        }
+        return exVal;
+        };
+
+    // 为了后面能找“ex最小、次小、次次小...”，我们把所有硬盘按 ex 排序
+    // 注意这里不区分是否真的有 hot_tag / hot_tag2 分区，因为要找下一个可用硬盘
+    // 只是在选 disk 时再判断 table.count(...)>0
+    vector<std::pair<int, int>> exList; // (ex, diskIdx)
+    exList.reserve(disks.size());
+    for (int i = 0; i < (int)disks.size(); ++i) {
+        exList.push_back({ getEx(i), i });
+    }
+    // 按ex从小到大排序；若想稳定排序可以加上 tie(...), 但通常没必要
+    sort(exList.begin(), exList.end(),
+        [](auto& a, auto& b) { return a.first < b.first; });
+
+    // ---- 1) 处理第一热标签 hot_tag ----
+    int diskForHotTag = -1; // 选中的硬盘ID
+    if (!anyDiskInHotTag) {
+        // 说明没有磁头在 hot_tag 分区内，需要找一个硬盘让它过去
+        // 按从 ex 最小开始找，直到找到“有 hot_tag 分区”的硬盘
+        for (auto& kv : exList) {
+            int exVal = kv.first;
+            int diskIdx = kv.second;
+            if (disks[diskIdx].table.count(hot_tag) == 0) {
+                // 该硬盘根本没 hot_tag 分区，跳过
+                continue;
+            }
+            // 找到了有 hot_tag 分区的硬盘
+
+            // 选择的分区迭代器
+            unordered_multimap<int, DISK::partition>::iterator itFind = disks[diskIdx].table.end();
+            int scores = disks[diskIdx].read_most(time, disks[diskIdx].head_idx, CHECKED_TIME + 1, r);
+            //寻找若干分区起始点中的最大得分者
+            auto range = disks[diskIdx].table.equal_range(hot_tag);
+            for (auto it = range.first;it != range.second;it++) {
+                size_t pass_target = it->second.begin;
+                int current_scores = disks[diskIdx].read_most(time, pass_target, CHECKED_TIME, r);
+                if (current_scores > scores) {
+                    scores = current_scores;
+                    itFind = it;
+                }
+            }
+            if (itFind != disks[diskIdx].table.end()) {
+                // 先尝试pass，否则jump，目标为找到的分区起始位置
+                if (!disks[diskIdx].pass_head(itFind->second.begin, time, r)) {
+                    disks[diskIdx].jump(itFind->second.begin, time, r);
+                    disks[diskIdx].time_flag = false;
+                }
+            }
+
+            // 找到hot_tag分区的起点(示例中先拿 find(hot_tag)->second.begin)
+            //auto itFind = disks[diskIdx].table.find(hot_tag);
+            //size_t pass_target = itFind->second.begin;
+            //int scores_a = disks[diskIdx].read_most(time, disks[diskIdx].head_idx, CHECKED_TIME + 1, r);
+            //int scores_b = disks[diskIdx].read_most(time, pass_target, CHECKED_TIME, r);
+            //if (scores_a <= scores_b) {
+            //    // 先尝试pass，否则jump
+            //    if (!disks[diskIdx].pass_head(pass_target, time, r)) {
+            //        disks[diskIdx].jump(pass_target, time, r);
+            //        disks[diskIdx].time_flag = false;
+            //    }
+            //}
+            diskForHotTag = diskIdx;
+            break; // 只处理一个硬盘即可
+        }
+    }
+
+    // ---- 2) 处理第二热标签 hot_tag2 ----
+    // 如果已经有磁头在 hot_tag2 分区，就啥也不做
+    if (anyDiskInHotTag2) {
+        return;
+    }
+
+    // 否则要找“ex值第二小”。实际上我们已经排好序了 exList；
+    // 所以就从头到尾依次找：既要 table.count(hot_tag2) > 0，又不能是 diskForHotTag。
+    for (auto& kv : exList) {
+        int exVal = kv.first;
+        int diskIdx = kv.second;
+        if (diskIdx == diskForHotTag) {
+            continue; // 不能和 hot_tag 是同一个硬盘
+        }
+        if (disks[diskIdx].table.count(hot_tag2) == 0) {
+            continue; // 该硬盘没有 hot_tag2 分区
+        }
+        // 找到了ex最小（从小到大）的硬盘，且不同于第一热标签所用
+
+        // 选择的分区迭代器
+        unordered_multimap<int, DISK::partition>::iterator itFind = disks[diskIdx].table.end();
+        int scores = disks[diskIdx].read_most(time, disks[diskIdx].head_idx, CHECKED_TIME + 1, r);
+        //寻找若干分区起始点中的最大得分者
+        auto range = disks[diskIdx].table.equal_range(hot_tag2);
+        for (auto it = range.first;it != range.second;it++) {
+            size_t pass_target = it->second.begin;
+            int current_scores = disks[diskIdx].read_most(time, pass_target, CHECKED_TIME, r);
+            if (current_scores > scores) {
+                scores = current_scores;
+                itFind = it;
+            }
+        }
+        if (itFind != disks[diskIdx].table.end()) {
+            // 先尝试pass，否则jump，目标为找到的分区起始位置
+            if (!disks[diskIdx].pass_head(itFind->second.begin, time, r)) {
+                disks[diskIdx].jump(itFind->second.begin, time, r);
+                disks[diskIdx].time_flag = false;
+            }
+        }
+
+            //auto itFind = disks[diskIdx].table.find(hot_tag2);
+            //size_t pass_target = itFind->second.begin;
+            //int scores_a = disks[diskIdx].read_most(time, disks[diskIdx].head_idx, 10, r);
+            //int scores_b = disks[diskIdx].read_most(time, pass_target, 9, r);
+            //if (scores_a <= scores_b) {
+            //    // pass / jump 逻辑
+            //    if (!disks[diskIdx].pass_head(pass_target, time, r)) {
+            //        disks[diskIdx].jump(pass_target, time, r);
+            //        disks[diskIdx].time_flag = false;
+            //    }
+            //}
+            
+        break; // 只让一个磁头去hot_tag2分区即可
+    }
+}
+
+
+//3个热分区的版本
+friend void check_at_hot_tag(vector<DISK>& disks,
+    int time,
+    const Request r[],
+    const vector<int>& req_tag)
+{
+    // 1) 找到 req_tag 中值最大的 3 个标签索引，若不足 3 个则只取前 N 个
+    //    这里给出一种简易写法：收集 (freq, tag) 到数组，按 freq 降序排序，取前三
+    //    假设标签编号是 1~M，则 req_tag[tag-1] 是该标签的请求频度
+    //    请确保 req_tag.size() >= 3，否则需要相应判断
+    vector<std::pair<int, int>> freqTag; // (请求数, tagIndex)
+    freqTag.reserve(req_tag.size());
+    for (int tag = 1; tag <= (int)req_tag.size(); ++tag) {
+        freqTag.push_back({ req_tag[tag - 1], tag });
+    }
+    // 按照频度从大到小排序
+    sort(freqTag.begin(), freqTag.end(),
+        [](auto& a, auto& b) { return a.first > b.first; });
+
+    // hot_tag1, hot_tag2, hot_tag3
+    // 如果 M >= 3，就取前三；若 M<3，就只取到 freqTag.size()
+    vector<int> topTags;
+    for (int i = 0; i < (int)freqTag.size() && i < 3; i++) {
+        // freqTag[i].second 即标签编号
+        topTags.push_back(freqTag[i].second);
+    }
+    // 如果全部为 0 也可能没任何热标签可做，可以直接 return
+    // 但这里假设至少有一个非零
+
+    // ---- 定义一个函数判断磁头是否在某个标签分区内 ----
+    auto headInTagPartition = [&](int diskIdx, int tag) {
+        if (disks[diskIdx].table.count(tag) == 0) return false;
+        auto range = disks[diskIdx].table.equal_range(tag);
+        for (auto it = range.first; it != range.second; ++it) {
+            // 若“磁头位置”在分区 [begin, begin+length)
+            if (disks[diskIdx].head_idx >= it->second.begin
+                && disks[diskIdx].head_idx < it->second.begin + it->second.length)
+            {
+                return true;
+            }
+        }
+        return false;
+        };
+
+    // ---- 定义一个函数计算当前磁头所在分区的“ex”值 ----
+    //      若磁头位于某分区 [it->second]，则 exVal = req_tag[it->first - 1]
+    //      如果还有 shared 分区可累加，(这里的 shared 是你原先代码里出现的东西)
+    auto getEx = [&](int diskIdx) {
+        int exVal = 0;
+        for (auto it = disks[diskIdx].table.begin(); it != disks[diskIdx].table.end(); ++it) {
+            if (disks[diskIdx].head_idx >= it->second.begin
+                && disks[diskIdx].head_idx < it->second.begin + it->second.length)
+            {
+                if (it->second.shared == nullptr) {
+                    exVal = req_tag[it->first - 1];
+                }
+                else {
+                    exVal = req_tag[it->first - 1] + req_tag[it->second.shared->key - 1];
+                }
+                break;
+            }
+        }
+        return exVal;
+        };
+
+    // ---- 预先按照 ex 值对所有硬盘排序（从小到大）----
+    vector<std::pair<int, int>> exList; // (ex, diskIdx)
+    exList.reserve(disks.size());
+    for (int i = 0; i < (int)disks.size(); ++i) {
+        exList.push_back({ getEx(i), i });
+    }
+    sort(exList.begin(), exList.end(),
+        [](auto& a, auto& b) { return a.first < b.first; });
+
+    // 记录“已被分配去处理某热标签”的硬盘，避免重复选中同一个
+    // 用一个 set/int array 标记即可
+    vector<bool> usedDisk(disks.size(), false);
+
+    // ---- 定义一个函数，让“最小 ex”硬盘去某标签分区 ----
+    //      返回该硬盘编号，若没找到就返回 -1
+    auto dispatchDiskToTag = [&](int tag) -> int {
+        // 先看看是否已经有磁头在这个标签分区
+        bool anyDiskInThisTag = false;
+        for (int i = 0; i < (int)disks.size(); ++i) {
+            if (headInTagPartition(i, tag)) {
+                anyDiskInThisTag = true;
+                break;
+            }
+        }
+        if (anyDiskInThisTag) {
+            return -1; // 已有人在分区，无需再派人过去
+        }
+        // 否则，从 exList 开始选硬盘
+        for (auto& kv : exList) {
+            int exVal = kv.first;
+            int diskIdx = kv.second;
+            if (usedDisk[diskIdx]) {
+                continue; // 已被别的标签使用
+            }
+            if (disks[diskIdx].table.count(tag) == 0) {
+                continue; // 该盘没有该标签分区
+            }
+            // 找到合适硬盘 => 选最优分区 (示例中的 read_most 逻辑)
+            auto range = disks[diskIdx].table.equal_range(tag);
+            auto itBest = disks[diskIdx].table.end();
+            int bestScore = disks[diskIdx].read_most(time, disks[diskIdx].head_idx, CHECKED_TIME + 1, r);
+
+            for (auto it = range.first; it != range.second; it++) {
+                size_t pass_target = it->second.begin;
+                int current_scores = disks[diskIdx].read_most(time, pass_target, CHECKED_TIME, r);
+                if (current_scores > bestScore) {
+                    bestScore = current_scores;
+                    itBest = it;
+                }
+            }
+            if (itBest != disks[diskIdx].table.end()) {
+                // 先 pass，否则 jump
+                if (!disks[diskIdx].pass_head(itBest->second.begin, time, r)) {
+                    disks[diskIdx].jump(itBest->second.begin, time, r);
+                    disks[diskIdx].time_flag = false;
+                }
+            }
+            usedDisk[diskIdx] = true; // 标记该硬盘已用于此标签
+            return diskIdx;
+        }
+        // 如果没找到合适硬盘，返回 -1
+        return -1;
+        };
+
+    // ---- 2) 依次处理 top 3 标签 ----
+    // topTags 里最多 3 个元素
+    for (int i = 0; i < (int)topTags.size(); i++) {
+        dispatchDiskToTag(topTags[i]);
+    }
+
+    // 完成
+}

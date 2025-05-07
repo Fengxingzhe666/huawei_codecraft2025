@@ -1,0 +1,3 @@
+D:/C_code/arraynew/CMake-disk_partition/out/build/x64-Debug/CMakeFiles/code_craft.dir
+D:/C_code/arraynew/CMake-disk_partition/out/build/x64-Debug/CMakeFiles/edit_cache.dir
+D:/C_code/arraynew/CMake-disk_partition/out/build/x64-Debug/CMakeFiles/rebuild_cache.dir

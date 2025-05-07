@@ -1,0 +1,582 @@
+#ifndef DISK_PARTITION
+#define DISK_PARTITION
+
+#include <iostream>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <climits> //linux编译必须
+
+using std::unordered_map;
+using std::unordered_multimap;
+using std::vector;
+using std::string;
+
+const int MAX_DISK_NUM = (10 + 1);          // 最大硬盘数(示例中预留10个+1)
+const int MAX_DISK_SIZE = (16384 + 1);      // 每块硬盘最大存储单元数量(示例中预留16384+1)
+const int MAX_REQUEST_NUM = (30000000 + 1); // 最大读请求数量
+const int MAX_OBJECT_NUM = (100000 + 1);    // 最大对象数量
+const int REP_NUM = 3;                      // 冗余副本数量(要求3份)
+const int MAX_SIZE = 5;                     // 题目中每个object的size最大值为5
+const int READ_COST[8] = { 64,52,42,34,28,23,19,16 };//连续读取消耗的tooken值
+const int READ_NULL_THRESHOLD[4] = { 3,5,5,6 };
+const int FRE_PER_SLICING = 1800;           // 时间片相关(示例中只演示，不深入使用)
+const double RED_POSITION_THRE = 10.0;            // 红色位置的请求数量阈值
+
+// 请求结构体，用于保存某次读请求的信息
+typedef struct Request_ {
+    int object_id;  // 需要读取的对象ID
+    int object_size;// 需要读取的对象的size
+    //int prev_id;    // 链表式指向上一个请求的ID(用于回溯)
+    int read_size_phase;//该请求目前读到的block位置，初始为0
+    bool has_read[MAX_SIZE];
+    //int time_flag;  //该请求距离发起时过的时间差，初始化为0，在请求完成前保持更新
+    int start_time;   //该请求发起的时间片序号
+    bool is_done;   // 该请求是否已完成
+} Request;
+
+// 对象结构体，用于保存对象信息，注意Request和Object的索引都是从1开始
+typedef struct Object_ {
+    int replica[REP_NUM];          // 记录对象的三个副本在哪些硬盘上
+    int* unit[REP_NUM];            // 每个副本对应的存储单元编号数组
+    int size;                      // 对象大小(单位: 对象块数)
+    int tag;                       // 新增：对象的tag
+    //int last_request_point;        // 记录最后一次发起读请求的编号(用于回溯、取消等)
+    bool is_delete;                // 标记该对象是否已被删除
+} Object;
+
+//得分的函数f(x)
+inline double func(int x) {
+    double ans;
+    if (x >= 0 && x <= 10) {
+        ans = -0.005 * (double)x + 1;
+    }
+    else if (x > 10 && x < 105) {
+        ans = -0.01 * (double)x + 1.05;
+    }
+    else
+        ans = 0.0;
+    return ans;
+}
+
+class DISK {
+private:
+    const size_t Len;                          //硬盘大小，使用size()接口
+    size_t remain;                             //硬盘当前剩余空闲位置数，使用remaining()接口
+    vector<int> data;                          //存储的数据，使用[]运算符重载访问
+    const int M;                               //tag值的种类数，该值必须在构造函数中初始化
+    const int G;                               //单次操作最多消耗的tooken数，必须初始化
+    int tooken_;                               //表示当前硬盘剩余的tooken
+    size_t head_idx;                           //表示当前硬盘的磁头位置，注意索引从0开始
+    //bool head_last_move;                       //表示上一个磁头的操作是否为读操作
+    int consecutive_read;                      //表示上一次磁头读操作消耗的tooken
+    struct partition {
+        int key;                            //该分区的key
+        size_t begin;                       //该分区在硬盘的起始位置索引
+        size_t length;                      //该分区的长度
+        size_t remain;                      //该分区的余量
+        //默认构造函数（供编译器生成哈希表用，实际不调用）
+        partition() : key(0), begin(0), length(0), remain(0) {}
+        //构造函数
+        partition(DISK& d, int k, size_t beg, int len) : key(k), begin(beg), length(len),remain(len) {
+            //构造分区，data值写为-1
+            for (size_t i = beg;i < beg + len;i++) {
+                d.data[i] = -1;
+            }
+        }
+        //获得分区从左到右第一个可用位置索引，已满则返回begin + length
+        size_t get_next_avail(const DISK& d) const{
+            for (size_t i = begin;i < begin + length;i++) {
+                if (d.data[i] <= 0) {
+                    return i;
+                }
+            }
+            return begin + length;
+        }
+        //返回分区是否为空
+        bool empty(const DISK& d)const {
+            for (size_t i = begin;i < begin + length;i++) {
+                if (d.data[i] > 0)
+                    return false;
+            }
+            return true;
+            //return remain == length;
+        }
+    };
+    unordered_multimap<int, partition> table;       //哈希表，使用tabled()接口
+    string c_str = "#";                        //用于保存硬盘动作的字符串
+    /*一个1* Len的数组，表示硬盘上每个存储单元当前是否存在读请求。如果第i个存储单元当前存在读请求，则request_pos[i] = {第i个存储单元存储的obj编号，该obj的block编号}，如果第i个存储单元当前不存在读请求则request_pos[i] = {0,1}*/
+    vector<std::pair<int, int>> request_pos;   
+    /*一个1* Len的数组，表示硬盘上第i个存储单元当前是否存在读请求，如存在则request_id[i] = vector<int>{(该位置的所有请求编号...)}，元素request_id[i][j]表示第i个存储单元当前第j个读请求的编号*/
+    vector<vector<int>> request_id; 
+    bool time_flag;                      //时间片标志，表示当前时间片该硬盘磁头是否能继续移动
+    //int d;                               //d值，表示该硬盘磁头距离最近的读请求的obj的距离
+
+
+    // 返回下一个能连续c个连续的存储单元的起始位置索引，供分区使用,（已预分配的不可用于分区），如果找不到则返回-1
+    int next(int c)const {
+        int left = 0, right = 0;
+        while (true) {
+            if (right == Len)
+                return -1;
+            while (data[right] != 0) {
+                right++;
+                left = right;
+                if (right == Len)
+                    return -1;
+            }
+            if (right - left + 1 == c) {
+                break;
+            }
+            right++;
+        }
+        return left;
+    }
+public:
+    //估算某时间片读取索引idx的存储单元的得分
+    double get_position_scores(int idx,int time,const Request r[])const {
+        double scores = 0.0;//分数
+        for (size_t i = 0;i < request_id[idx].size();i++) {
+            scores += func(time - r[request_id[idx][i]].start_time) * (r[request_id[idx][i]].object_size + 1) / 2;
+        }
+        return scores;
+    }
+
+    //通过遍历计算硬盘的d值（时间复杂度高，尽量减少调用）（跳过得分为0的位置）
+    int update_d(int time,const Request r[]) const {
+        int ans = 0;
+        while (request_pos[(ans + head_idx) % Len].first == 0 || get_position_scores((ans + head_idx) % Len,time,r) < 0.0001) {
+            ans++;
+            if (ans == Len) {
+                break;
+            }
+        }
+        return ans;
+    }
+    //通过遍历计算硬盘的大d值（时间复杂度高）
+    int update_big_d(int time, const Request r[])const {
+        int ans = 0;
+        while (request_pos[(ans + head_idx) % Len].first == 0 || get_position_scores((ans + head_idx) % Len, time, r) < RED_POSITION_THRE) {
+            ans++;
+            if (ans == Len) {
+                break;
+            }
+        }
+        return ans;
+    }
+    DISK() :Len(1), remain(1), M(1), head_idx(0), consecutive_read(0), G(64),tooken_(64), time_flag(true){
+        data = vector<int>(Len, 0);
+        request_pos = vector<std::pair<int, int>>(Len, { 0,-1 });
+        request_id = vector<vector<int>>(Len);
+    }
+    DISK(size_t v, int m,int g) :Len(v), remain(v), M(m), head_idx(0), consecutive_read(0),G(g),tooken_(g), time_flag(true){
+        data = vector<int>(Len, 0);
+        request_pos = vector<std::pair<int, int>>(Len, { 0,-1 });
+        request_id = vector<vector<int>>(Len);
+    }
+    //返回当前硬盘的磁头位置索引（索引从0开始）
+    size_t head()const { return head_idx; }
+    size_t& head() { return head_idx; }
+    int tooken()const { return tooken_; }
+    //返回硬盘时间标志位，传递地址方便外部修改这个值
+    bool& flag() { return time_flag; }
+    //硬盘进入下一个时间片，更新硬盘参数（更新每一个硬盘的剩余tooken为G，刷新参数c_str，刷新time_flag为true）
+    friend void update_timesample(vector<DISK>& d) {
+        for (size_t i = 0;i < d.size();i++) {
+            d[i].tooken_ = d[i].G;
+            d[i].c_str = "#";
+            d[i].time_flag = true;
+        }
+    }
+    //返回当前磁头到目标索引target的距离（磁头只能单向移动）
+    size_t distance(size_t target)const { 
+        size_t temp = 0;
+        // 如果目标位置在当前磁头之后，直接做减法
+        if (target >= head_idx) {
+            temp = target - head_idx;
+        }
+        else {
+            // 否则先算与尾部的距离，再加上 target
+            temp = (Len - head_idx) + target;
+        }
+        return temp;
+    }
+
+    //向磁盘写入一个tag的数据，返回写入位置的索引
+    size_t writein(int tag,const vector<int>& wr) {
+        if (table.count(tag)) {
+            //已经创建分区了
+            auto range = table.equal_range(tag);
+            for (auto it = range.first;it != range.second;it++) {
+                size_t flag = it->second.get_next_avail(*this);
+                if (flag < it->second.begin + it->second.length) {
+                    //如果分区还有剩余空间，直接写入数据
+                    data[flag] = tag;
+                    remain--;
+                    it->second.remain--;
+                    return flag;
+                }
+            }
+            //分区已经没有空间
+            int disk_next_available = next(wr[tag - 1]);
+            if (disk_next_available >= 0) {
+                //剩下的空间还能再分区，则重新补一个分区：
+                partition p(*this, tag, disk_next_available, wr[tag - 1]);
+                data[disk_next_available] = tag;
+                remain--;
+                p.remain--;
+                table.insert({ tag,p });//插入新分区
+                return disk_next_available;
+            }
+            else {
+                //剩下的空间已经不能继续分区了，只能向后暴力写入
+                return brute_write(tag);
+            }
+        }
+        else {
+            //还没有分区
+            int disk_next_available = next(wr[tag - 1]);
+            if (disk_next_available >= 0) {
+                //剩余空间足够创建新分区
+                partition p(*this, tag, disk_next_available, wr[tag - 1]);
+                data[disk_next_available] = tag;//写入数据
+                remain--;
+                p.remain--;
+                table.insert({ tag,p });//插入新分区
+                return disk_next_available;
+            }
+            else {
+                //剩余空间不足创建新分区，暴力写入
+                return brute_write(tag);
+            }
+        }
+    }
+    //暴力写入（从左往右找到一个空位置就写入），返回写入位置的索引
+    size_t brute_write(int tag) {
+        size_t write_idx = 0;
+        while (data[write_idx] > 0) {
+            write_idx++;//write_idx是从左往右第一个空位置
+            if (write_idx == Len) {
+                throw std::out_of_range("磁盘空间已满，写入操作失败");
+                break;
+            }
+        }
+        data[write_idx] = tag;
+        remain--;
+        for (auto it = table.begin();it != table.end();it++) {
+            if (it->second.begin <= write_idx && write_idx <= it->second.begin + it->second.length) {
+                it->second.remain--;//对应位置分区余量-1
+                break;
+            }
+        }
+        return write_idx;
+    }
+    //删除该硬盘索引idx的数据
+    void delete_act(size_t idx) {
+        for (auto it = table.begin();it != table.end();it++) {
+            if (it->second.begin <= idx && idx <= it->second.begin + it->second.length) {
+                //it->second此时就代表包含idx的分盘partition，该位置先写为-1
+                data[idx] = -1;
+                remain++;
+                it->second.remain++;
+                if (it->second.empty(*this)) {
+                    //如果该分区已经为空
+                    for (size_t i = it->second.begin;i < it->second.begin + it->second.length;i++) {
+                        data[i] = 0;//删除该分区，所有位置写为0
+                    }
+                    table.erase(it);//删除哈希表中的此分区
+                }
+                return;
+            }
+        }
+        //没有找到idx匹配的分区，说明该idx不在分区里，直接写0
+        data[idx] = 0;
+        remain++;
+    }
+    //尝试在当前磁头位置进行读操作，返回值代表实际是否读取成功，如果tooken不足什么都不做并返回false
+    bool read_act() {
+        //计算读取需要消耗的tooken
+        int cost = 0;
+        if (consecutive_read < 7)
+            cost = READ_COST[consecutive_read];
+        else
+            cost = READ_COST[7];
+        if (cost <= tooken_) {
+            //可以读取
+            head_idx = (head_idx + 1) % Len;//移动磁头到下一个位置
+            consecutive_read++;//更新参数
+            //head_last_move = true;//更新参数
+            tooken_ -= cost;//更新剩余tooken值
+            c_str.back() = 'r', c_str.push_back('#');
+            return true;
+        }
+        else
+            return false;//由于tooken不足，读取失败
+    }
+
+    //尝试进行n次pass操作将磁头移动到target位置，如果tooken不足就什么都不做，返回是否移动成功
+    bool pass_head(int target) {
+        int n = distance(target);//需要n次pass操作
+        if (n <= tooken_) {
+            if (n > 4) {
+                head_idx = target;
+                consecutive_read = 0;
+                tooken_ -= n;//每次消耗 1 tooken
+                c_str.pop_back();
+                for (int i = 0;i < n;i++)
+                    c_str.push_back('p');
+                c_str.push_back('#');
+                return true;
+            }
+            else {
+                //对于距离为1~4的目标，可以考虑连读
+                if (consecutive_read > READ_NULL_THRESHOLD[n - 1]) {
+                    //采用连读策略，先记录硬盘状态
+                    /*size_t origenal_head = head_idx;
+                    int origenal_consecutive_read = consecutive_read;
+                    int origenal_tooken = tooken_;
+                    string origenal_c_str = c_str;*/
+                    for (int i = 0;i < n;i++) {
+                        //进行n次连读（读的位置均为空数据），进行到失败的那一步
+                        if (!read_act()) {
+                            //读失败，硬盘状态复原，返回假
+                            /*head_idx = origenal_head;
+                            consecutive_read = origenal_consecutive_read;
+                            tooken_ = origenal_tooken;
+                            c_str = origenal_c_str;*/
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                else {
+                    head_idx = target;
+                    consecutive_read = 0;
+                    tooken_ -= n;//每次消耗 1 tooken
+                    c_str.pop_back();
+                    for (int i = 0;i < n;i++)
+                        c_str.push_back('p');
+                    c_str.push_back('#');
+                    return true;
+                }
+            }
+        }
+        else {
+            return false;
+        }
+        
+    }
+    //尝试一次jump到目标位置，返回是否成功，如果tooken不足就什么都不做
+    bool jump(int target) {
+        if (tooken_ == G) {
+            head_idx = target;
+            //head_last_move = false;
+            consecutive_read = 0;
+            tooken_ = 0;
+            //注意输出的时候，索引是从1开始，所以需要+1
+            c_str = "j " + std::to_string(target + 1);
+        }
+        else
+            return false;
+    }
+
+    //将一个Request压入DISK中，更新存储该读请求的请求对象object的三个硬盘的参数request_pos、request_id、d
+    friend void push_Request_in(vector<DISK>& d,const Request& r,const Object obj[MAX_OBJECT_NUM],int r_idx) {
+        DISK* d0 = &d[obj[r.object_id].replica[0]], * d1 = &d[obj[r.object_id].replica[1]], * d2 = &d[obj[r.object_id].replica[2]];
+        for (size_t i = 0;i < r.object_size;i++) {
+            d0->request_pos[obj[r.object_id].unit[0][i]] = { r.object_id,i };
+            d0->request_id[obj[r.object_id].unit[0][i]].push_back(r_idx);
+            d1->request_pos[obj[r.object_id].unit[1][i]] = { r.object_id,i };
+            d1->request_id[obj[r.object_id].unit[1][i]].push_back(r_idx);
+            d2->request_pos[obj[r.object_id].unit[2][i]] = { r.object_id,i };
+            d2->request_id[obj[r.object_id].unit[2][i]].push_back(r_idx);
+        }
+    }
+    //在读取成功后，将读取位置对应的所有请求的对应block处的request_pos[target]重新设置为初始值，注意本函数仅清除object的指定block处的request_pos[]
+    friend void pop_Request_out(vector<DISK>& d, const Request& r, const Object obj[MAX_OBJECT_NUM],int r_idx,int block_idx) {
+        DISK* d0 = &d[obj[r.object_id].replica[0]], * d1 = &d[obj[r.object_id].replica[1]], * d2 = &d[obj[r.object_id].replica[2]];
+        //指定block_idx，仅清除object的指定block
+        d0->request_pos[obj[r.object_id].unit[0][block_idx]] = { 0,-1 };
+        d1->request_pos[obj[r.object_id].unit[1][block_idx]] = { 0,-1 };
+        d2->request_pos[obj[r.object_id].unit[2][block_idx]] = { 0,-1 };
+    }
+    
+    //返回DISK数组time_flag为true的元素中d值最小的DISK元素的地址，如果time_flag全为false则返回一个空指针
+    friend DISK* get_nearest_disk(vector<DISK>& disks,int time,Request r[]) {
+        // 用于记录找到的 DISK 对象指针
+        DISK* nearest = nullptr;
+        // 用一个大值做初始比较值
+        int min_d_value = INT_MAX;
+        // 遍历所有DISK，找到 time_flag 为 true 且 update_d() 返回值最小者
+        for (size_t i = 0; i < disks.size(); ++i) {
+            if (disks[i].time_flag) {
+                int cur_d = disks[i].update_d(time,r);
+                if (cur_d == disks[0].Len)
+                    continue;
+                if (cur_d < min_d_value) {
+                    min_d_value = cur_d;
+                    nearest = &disks[i];
+                }
+            }
+        }
+        // 如果全部 time_flag 为 false，则 nearest 保持 nullptr
+        return nearest;
+    }
+    friend DISK* get_nearest_disk_bigd(vector<DISK>& disks, int time, Request r[]) {
+        // 用于记录找到的 DISK 对象指针
+        DISK* nearest = nullptr;
+        // 用一个大值做初始比较值
+        int min_d_value = INT_MAX;
+        // 遍历所有DISK，找到 time_flag 为 true 且 update_d() 返回值最小者
+        for (size_t i = 0; i < disks.size(); ++i) {
+            if (disks[i].time_flag) {
+                int cur_d = disks[i].update_big_d(time, r);
+                if (cur_d == disks[0].Len)
+                    continue;
+                if (cur_d < min_d_value) {
+                    min_d_value = cur_d;
+                    nearest = &disks[i];
+                }
+            }
+        }
+        // 如果全部 time_flag 为 false，则 nearest 保持 nullptr
+        return nearest;
+    }
+    //全体硬盘执行特殊jump
+    friend void special_jump(vector<DISK>& disk, int time, Request r[]) {
+        for (size_t i = 0;i < disk.size();i++) {
+            int big_d = disk[i].update_big_d(time,r); //计算硬盘的大d值
+            if (big_d != disk[i].Len) {
+                if (big_d > disk[i].G) {
+                    disk[i].jump((disk[i].head_idx + big_d) % disk[i].Len);
+                    disk[i].time_flag = false;
+                }
+                else {
+                    disk[i].pass_head((disk[i].head_idx + big_d) % disk[i].Len);
+                }
+            }
+        }
+    }
+
+    //返回一个std::pair<int,int>，如果当前硬盘第idx个存储单元不存在读请求，默认返回{0,-1}；如果存在读请求，返回的第一个元素表示该硬盘第idx个存储单元存储的object对象索引，第二个数表示该object对象在这个位置存储的block索引
+    std::pair<int, int> get_request_pos(int idx)const { return request_pos[idx]; }
+
+    //返回数组表示第idx个存储单元现在存在的读请求编号
+    const vector<int>& get_request_id(int idx)const { return request_id[idx]; }
+
+    //当某个request需要被清除时（某个时间片该元素被删除但仍存在未完成的相关读请求）调用，更新DISK的成员变量request_id[target]，删除其中值为r_idx的元素，删除后如果request_id[target]为空还需要更新d值
+    friend void clear_request_id(vector<DISK>& d, const Request& r, const Object obj[MAX_OBJECT_NUM], int r_idx, int block_idx = -1) {
+        DISK* d0 = &d[obj[r.object_id].replica[0]], * d1 = &d[obj[r.object_id].replica[1]], * d2 = &d[obj[r.object_id].replica[2]];
+        if (block_idx == -1) {
+            //如果没有指定block索引，清除该请求对应的object的所有block
+            for (size_t i = 0;i < r.object_size;i++) {
+                //更新DISK的成员变量request_id[target]，删除其中值为r_idx的元素
+                d0->request_id[obj[r.object_id].unit[0][i]].erase(
+                    std::remove(d0->request_id[obj[r.object_id].unit[0][i]].begin(), d0->request_id[obj[r.object_id].unit[0][i]].end(), r_idx)
+                    , d0->request_id[obj[r.object_id].unit[0][i]].end());
+                d1->request_id[obj[r.object_id].unit[1][i]].erase(
+                    std::remove(d1->request_id[obj[r.object_id].unit[1][i]].begin(), d1->request_id[obj[r.object_id].unit[1][i]].end(), r_idx)
+                    , d1->request_id[obj[r.object_id].unit[1][i]].end());
+                d2->request_id[obj[r.object_id].unit[2][i]].erase(
+                    std::remove(d2->request_id[obj[r.object_id].unit[2][i]].begin(), d2->request_id[obj[r.object_id].unit[2][i]].end(), r_idx)
+                    , d2->request_id[obj[r.object_id].unit[2][i]].end());
+                if (d0->request_id[obj[r.object_id].unit[0][i]].empty()) {
+                    //如果删除以后这里已经为空，需要进一步清除request_pos，对三个副本对应的硬盘都是如此
+                    d0->request_pos[obj[r.object_id].unit[0][i]] = { 0,-1 };
+                }
+                if (d1->request_id[obj[r.object_id].unit[1][i]].empty()) {
+                    d1->request_pos[obj[r.object_id].unit[1][i]] = { 0,-1 };
+                }
+                if (d2->request_id[obj[r.object_id].unit[2][i]].empty()) {
+                    d2->request_pos[obj[r.object_id].unit[2][i]] = { 0,-1 };
+                }  
+            }
+        }
+        else {
+            //如果指定了block索引，只清除object对应的block
+            d0->request_id[obj[r.object_id].unit[0][block_idx]].clear();
+            d1->request_id[obj[r.object_id].unit[1][block_idx]].clear();
+            d2->request_id[obj[r.object_id].unit[2][block_idx]].clear();
+        }
+    }
+
+    //返回若干硬盘中，剩余空间最多的3个，返回的是索引
+    friend vector<int> findTop3(const vector<DISK>& disks) {
+        // 假设 disks.size() >= 3
+        
+        // 分别存储前三大数的值和索引
+        int max1 = INT_MIN, max2 = INT_MIN, max3 = INT_MIN;
+        int idx1 = -1, idx2 = -1, idx3 = -1;
+
+        for (int i = 0; i < (int)disks.size(); ++i) {
+            int val = disks[i].remain;
+
+            // 如果当前值比第一大值还大，就依次“降级”之前的记录
+            if (val > max1) {
+                max3 = max2;    idx3 = idx2;
+                max2 = max1;    idx2 = idx1;
+                max1 = val;     idx1 = i;
+            }
+            // 否则如果当前值比第二大值还大
+            else if (val > max2) {
+                max3 = max2;    idx3 = idx2;
+                max2 = val;     idx2 = i;
+            }
+            // 否则如果当前值比第三大值还大
+            else if (val > max3) {
+                max3 = val;     idx3 = i;
+            }
+        }
+        // 按降序返回前三大数的索引
+        return { idx1, idx2, idx3 };
+    }
+    //返回若干硬盘中，最佳的3个写入的位置，返回的是索引
+    friend vector<int> findBest3(const vector<DISK>& disks,int tag,int size) {
+        vector<int> coefficient(disks.size(),0);//权重
+        // coefficient[i]表示第i个硬盘上的tag分区的剩余大小
+        for (int i = 0;i < disks.size();i++) {
+            if (disks[i].table.count(tag)) {
+                auto range = disks[i].table.equal_range(tag);
+                for (auto it = range.first;it != range.second;it++) {
+                    coefficient[i] += it->second.remain;
+                }
+                if (coefficient[i] >= size) {
+                    coefficient[i] += disks[i].Len;
+                }
+            }
+            else {
+                coefficient[i] = disks[i].remain;
+            }
+        }
+        // 分别存储前三大数的值和索引
+        int max1 = INT_MIN, max2 = INT_MIN, max3 = INT_MIN;
+        int idx1 = -1, idx2 = -1, idx3 = -1;
+        for (int i = 0; i < (int)disks.size(); ++i) {
+            int val = coefficient[i];
+            // 如果当前值比第一大值还大，就依次“降级”之前的记录
+            if (val > max1) {
+                max3 = max2;    idx3 = idx2;
+                max2 = max1;    idx2 = idx1;
+                max1 = val;     idx1 = i;
+            }
+            // 否则如果当前值比第二大值还大
+            else if (val > max2) {
+                max3 = max2;    idx3 = idx2;
+                max2 = val;     idx2 = i;
+            }
+            // 否则如果当前值比第三大值还大
+            else if (val > max3) {
+                max3 = val;     idx3 = i;
+            }
+        }
+        return { idx1,idx2,idx3 };
+    }
+    //返回若干硬盘的磁头状态的c风格字符串
+    friend void get_cstr(const vector<DISK>& disks) {
+        for (size_t i = 0;i < disks.size();i++)
+            std::cout << disks[i].c_str << std::endl;
+    }
+};
+
+#endif // !DISK_PARTITION

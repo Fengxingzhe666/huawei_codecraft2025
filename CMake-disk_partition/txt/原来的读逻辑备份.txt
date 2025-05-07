@@ -1,0 +1,177 @@
+/*
+* n_read：代表这一时间片读取对象的个数。 输入数据保证总读取次数小于等于30000000。
+* 接下来 n_read 行，每行两个数 req_id[i]、 obj_id[i]，代表当前时间片读取的请求编号和请求的对象
+编号。 输入数据保证读请求编号为 1 开始每次递增 1 的整数， 读取的对象在请求到来的时刻一定在存储系
+统中。
+*/
+// 读取动作处理函数
+void read_action()
+{
+    int n_read;
+    int request_id, object_id;
+
+    //清除时间差标志超过阈值的请求：
+    pendingRequests.erase(std::remove_if(pendingRequests.begin(), pendingRequests.end(),
+        [&](int idx) {
+            if (request[idx].time_flag > TIME_LIMIT) {
+                //timeout_req_Set.insert(idx); //将要删除的元素保存在哈希结构中
+                timeout_req_Set0.insert({ request[idx].object_id,idx });
+                return true; // 返回 true 表示要删除该元素
+            }
+            return false; // 返回 false 不删除
+        }), pendingRequests.end());
+    // 本时间片有多少个读请求
+    scanf("%d", &n_read);
+
+    //计算插入位置索引：
+    int insert_pos = 0;
+    for (int i = 0;i < pendingRequests.size();i++) {
+        if (request[pendingRequests[i]].read_size_phase == 0) {
+            insert_pos = i;
+            break;
+        }
+        insert_pos++;
+    }
+    // 读取所有读请求，并串成“单向链表”，方便回溯
+    for (int i = 1; i <= n_read; i++) {
+        scanf("%d%d", &request_id, &object_id);
+        // 记录该读请求对应的对象、上一个请求ID
+        request[request_id].object_id = object_id;
+        request[request_id].prev_id = object[object_id].last_request_point;
+        //该请求的下一个该读取的块，初始为0
+        request[request_id].read_size_phase = 0;
+        //该请求的时间差标志，初始为0
+        request[request_id].time_flag = 0;
+        // 将该请求链到对象的末尾
+        object[object_id].last_request_point = request_id;
+        // 刚到来的请求标记未完成
+        request[request_id].is_done = false;
+        // 放入待处理队列
+        //pendingRequests.push_back(request_id);
+        pendingRequests.insert(pendingRequests.begin() + insert_pos, request_id);
+    }
+    // 用来记录本时间片完成的所有请求ID
+    std::vector<int> finishedThisTurn;
+    //先让disk进入新时间片待命：（这一步是为了更新DISK参数）
+    update_timesample(disk);
+    if (pendingRequests.empty()) {
+        //输出所有磁头不动
+        get_cstr(disk);
+        std::cout << 0 << std::endl;
+        return;
+    }
+    for (int i = 0;i < pendingRequests.size();i++) {
+        //当前请求索引
+        int current_request = pendingRequests[i];
+        if (request[current_request].is_done)
+            continue;//请求已完成，跳至下一个
+        //当前请求读取的object索引
+        int obj_idx = request[current_request].object_id;
+        //当前请求读取的object的size
+        int obj_size = object[obj_idx].size;
+
+        //寻找pendingRequest中还未开始且object_id相同的request，当本request读取成功时，满足条件的这些request也视为成功
+        vector<int> grouped;
+        /*for (int group_idx = i + 1;group_idx < pendingRequests.size();group_idx++) {
+            if (request[pendingRequests[group_idx]].object_id == obj_idx && request[pendingRequests[group_idx]].read_size_phase==0 && request[current_request].read_size_phase==0 && !request[pendingRequests[group_idx]].is_done) {
+                grouped.push_back(pendingRequests[group_idx]);
+            }
+        }*/
+        /*auto range = timeout_req_Set0.equal_range(obj_idx);
+        for (auto it = range.first;it != range.second;it++) {
+            if (request[it->second].read_size_phase == 0)
+                grouped.push_back(it->second);
+        }*/
+
+        bool complete = true;//表示是否完整地读取了这个对象的所有block
+        for (int j = request[current_request].read_size_phase;j < obj_size;j++) {
+            //第current_request个request，第j个block：
+            
+            //选择要操作的硬盘
+            vector<size_t> disk_choose_arr = getLeastToken(
+                disk[object[obj_idx].replica[0]], object[obj_idx].unit[0][j],
+                disk[object[obj_idx].replica[1]], object[obj_idx].unit[1][j],
+                disk[object[obj_idx].replica[2]], object[obj_idx].unit[2][j]);
+            bool blockReadOK = false; // 该块是否读取成功
+            for (int fallback_idx = 0; fallback_idx < 1; fallback_idx++) {
+                //fallback_idx = 0为最优硬盘，=1为次优，=2为最次
+                size_t chosed_idx = disk_choose_arr[fallback_idx];
+                DISK* choosed_disk = &disk[object[obj_idx].replica[chosed_idx]];
+                size_t unit_target = object[obj_idx].unit[chosed_idx][j];
+
+                if (choosed_disk->head() == unit_target) {
+                    //如果磁头已经在目标位置了，可以直接尝试读取：
+                    if (choosed_disk->read_act()) {
+                        //读取成功了，开始下一个block循环
+                        request[current_request].read_size_phase++;
+                        object[obj_idx].last_request_point = current_request;
+                        blockReadOK = true;
+                        break;  // 退出fallback循环
+                    }
+                    else {
+                        //读取失败，因为该硬盘剩余tooken不足。尝试下一个硬盘
+                        continue;
+                    }
+                }
+                else {
+                    //如果磁头不在目标位置，就先尝试pass到目标位置
+                    if (choosed_disk->pass_head(unit_target)) {
+                        //pass成功了，尝试进行读取
+                        if (choosed_disk->read_act()) {
+                            //读取成功了，开始下一个block循环
+                            request[current_request].read_size_phase++;
+                            object[obj_idx].last_request_point = current_request;
+                            blockReadOK = true;
+                            break;
+                        }
+                        else {
+                            //读取失败，尝试下一个硬盘
+                            continue;
+                        }
+                    }
+                    else {
+                        //这说明连pass到目标位置都无法实现了，有2种可能，第一种是当前剩余tooken过少，第二种是当前磁头位置与目标距离太远了，需要一次jump操作
+                        choosed_disk->jump(unit_target);
+                        //无论是哪种情况，当前时间片都不可能再完成该对象的读取了
+                        continue;
+                    }
+                }
+            }
+            if (!blockReadOK) {
+                // 3 个硬盘都无法读到该 block => 本对象后续block也读不了
+                complete = false;
+                break; // 退出当前对象的block循环
+            }
+        }
+        if (complete) {
+            //对request[current_request]的读取已经完毕
+            finishedThisTurn.push_back(current_request);
+            for (int j = 0;j < grouped.size();j++) {
+                finishedThisTurn.push_back(grouped[j]);
+                request[grouped[j]].is_done = true;
+                request[grouped[j]].read_size_phase = object[request[grouped[j]].object_id].size - 1;
+            }
+            request[current_request].is_done = true;
+        }
+    }
+    //根据finishedThisTurn清除pendingRequests里的元素（GPT）
+    unordered_set<int> finishedSet(finishedThisTurn.begin(),finishedThisTurn.end());
+    auto new_end = std::remove_if(pendingRequests.begin(), pendingRequests.end(),
+        [&finishedSet](int val) {
+            return finishedSet.find(val) != finishedSet.end();
+        });
+    pendingRequests.erase(new_end, pendingRequests.end());
+    //输出N个磁头的动作
+    get_cstr(disk);
+    //输出完成的请求个数
+    std::cout << finishedThisTurn.size() << std::endl;
+    //分别输出完成的请求的编号
+    for (size_t i = 0;i < finishedThisTurn.size();i++) {
+        std::cout << finishedThisTurn[i] << std::endl;
+    }
+    //对每个仍未完成的请求，其时间差标志+1
+    for (size_t i = 0;i < pendingRequests.size();i++) {
+        request[pendingRequests[i]].time_flag++;
+    }
+    fflush(stdout);
+}

@@ -1,0 +1,48 @@
+//全体硬盘执行特殊jump
+friend void special_jump(vector<DISK>& disk, int time, Request r[]) {
+    for (size_t i = 0;i < disk.size();i++) {
+        int big_d = disk[i].update_big_d(time,r); //计算硬盘的大d值
+        if (big_d != disk[i].Len) {
+            if (big_d > disk[i].G) {
+                disk[i].jump((disk[i].head_idx + big_d) % disk[i].Len);
+                disk[i].time_flag = false;
+            }
+            else {
+                disk[i].pass_head((disk[i].head_idx + big_d) % disk[i].Len);
+            }
+        }
+    }
+}
+
+//全体硬盘执行特殊jump
+friend void special_jump(vector<DISK>& disk, int time, Request r[],int hot_tag) {
+    vector<int> temp(disk.size());
+    for (int i = 0;i < disk.size();++i) {
+        temp[i] = i;
+    }
+    // 创建一个随机数生成器
+    std::mt19937 generator(std::random_device{}());
+    std::shuffle(temp.begin(), temp.end(),generator);
+    int cishu = 0;
+    for (size_t i = 0;i < disk.size();++i) {
+        int idx = temp[i];
+        if (disk[idx].table.count(hot_tag) == 0)
+            continue;
+        auto range = disk[idx].table.equal_range(hot_tag);
+        int d = -1;//d表示热tag分区起始位置
+        for (auto it = range.first;it != range.second;it++) {
+            //快到热tag的分区起始，或者已经在热tag分区里，该硬盘磁头无需额外动作
+            if (disk[idx].distance(it->second.begin) < disk[idx].G || disk[idx].distance(it->second.begin) > disk[idx].Len - it->second.length) {
+                d = -1;
+                break;
+            }
+            d = it->second.begin;
+        }
+        if (d == -1) continue;
+        disk[idx].jump(d);
+        disk[idx].time_flag = false;
+        /*cishu++;
+        if (cishu == 3)*/
+        break;
+    }
+}

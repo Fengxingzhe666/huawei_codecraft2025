@@ -1,0 +1,44 @@
+//返回若干硬盘中，最佳的3个写入的位置，返回的是索引
+friend vector<int> findBest3(const vector<DISK>& disks,int tag,int size) {
+    vector<int> coefficient(disks.size(),0);//权重
+    // coefficient[i]表示第i个硬盘上的tag分区的剩余大小
+    for (int i = 0;i < disks.size();i++) {
+        if (disks[i].table.count(tag)) {
+            auto range = disks[i].table.equal_range(tag);
+            for (auto it = range.first;it != range.second;it++) {
+                coefficient[i] += it->second.remain;
+            }
+            if (coefficient[i] >= size) {
+                coefficient[i] += disks[i].Len;
+            }
+            else {
+                coefficient[i] = disks[i].remain;
+            }
+        }
+        else {
+            coefficient[i] = disks[i].remain;
+        }
+    }
+    // 分别存储前三大数的值和索引
+    int max1 = INT_MIN, max2 = INT_MIN, max3 = INT_MIN;
+    int idx1 = -1, idx2 = -1, idx3 = -1;
+    for (int i = 0; i < (int)disks.size(); ++i) {
+        int val = coefficient[i];
+        // 如果当前值比第一大值还大，就依次“降级”之前的记录
+        if (val > max1) {
+            max3 = max2;    idx3 = idx2;
+            max2 = max1;    idx2 = idx1;
+            max1 = val;     idx1 = i;
+        }
+        // 否则如果当前值比第二大值还大
+        else if (val > max2) {
+            max3 = max2;    idx3 = idx2;
+            max2 = val;     idx2 = i;
+        }
+        // 否则如果当前值比第三大值还大
+        else if (val > max3) {
+            max3 = val;     idx3 = i;
+        }
+    }
+    return { idx1,idx2,idx3 };
+}

@@ -1,0 +1,102 @@
+//向磁盘写入一个tag的数据，返回写入位置的索引
+size_t writein(int tag) {
+    if (table.count(tag)) {
+        //已经创建分区了
+        size_t flag = table[tag].get_next_avail(*this);
+        if (flag < table[tag].begin + table[tag].length) {
+            //如果分区还有剩余空间，直接写入数据
+            data[flag] = tag;
+            remain--;
+            return flag;
+        }
+        else {
+            //分区已经没有空间
+            int disk_next_available = next();
+            if (disk_next_available >= 0) {
+                //剩下的空间还能再分区，则重新补一个分区：
+                //vector<size_t> avail_range = disk.get_next_range(partition_len);
+                partition p(*this, tag, disk_next_available, Len / M);
+                data[disk_next_available] = tag;
+                remain--;
+                disk_next_available += Len / M;
+                table[tag] = p;//哈希表中用新分区替代原已满的分区
+                return disk_next_available - Len / M;
+            }
+            else {
+                //剩下的空间已经不能继续分区了，只能向后暴力写入
+                return brute_write(tag);
+            }
+        }
+    }
+    else {
+        //还没有分区
+        int disk_next_available = next();
+        if (disk_next_available >= 0) {
+            //剩余空间足够创建新分区
+            partition p(*this,tag, disk_next_available, Len / M);//分区长度:Len / M
+            data[disk_next_available] = tag;//写入数据
+            remain--;
+            disk_next_available += Len / M;
+            table[tag] = p;//更新哈希表
+            return disk_next_available - Len / M;
+        }
+        else {
+            //剩余空间不足创建新分区，暴力写入
+            return brute_write(tag);
+        }
+    }
+}
+
+新逻辑：
+把成员
+unordered_map<int, partition> table;
+改为
+unordered_multimap<int, partition> table;
+修改函数：
+   //向磁盘写入一个tag的数据，返回写入位置的索引
+   size_t writein(int tag) {
+       if (table.count(tag)) {
+           //已经创建分区了
+           auto range = table.equal_range(tag);
+           for (auto it = range.first;it != range.second;it++) {
+               size_t flag = it->second.get_next_avail(*this);
+               if (flag < it->second.begin + it->second.length) {
+                   //如果分区还有剩余空间，直接写入数据
+                   data[flag] = tag;
+                   remain--;
+                   return flag;
+               }
+           }
+           //分区已经没有空间
+           int disk_next_available = next();
+           if (disk_next_available >= 0) {
+               //剩下的空间还能再分区，则重新补一个分区：
+               //vector<size_t> avail_range = disk.get_next_range(partition_len);
+               partition p(*this, tag, disk_next_available, Len / M);
+               data[disk_next_available] = tag;
+               remain--;
+               table.insert({ tag,p });//插入新分区
+               return disk_next_available;
+           }
+           else {
+               //剩下的空间已经不能继续分区了，只能向后暴力写入
+               return brute_write(tag);
+           }
+       }
+       else {
+           //还没有分区
+           int disk_next_available = next();
+           if (disk_next_available >= 0) {
+               //剩余空间足够创建新分区
+               partition p(*this,tag, disk_next_available, Len / M);//分区长度:Len / M
+               data[disk_next_available] = tag;//写入数据
+               remain--;
+               table.insert({ tag,p });//插入新分区
+               return disk_next_available;
+           }
+           else {
+               //剩余空间不足创建新分区，暴力写入
+               return brute_write(tag);
+           }
+       }
+   }
