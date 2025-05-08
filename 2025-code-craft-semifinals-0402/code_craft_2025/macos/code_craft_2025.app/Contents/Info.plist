@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>code_craft_2025</string>
+	<key>CFBundleExecutable</key>
+	<string>code_craft_2025</string>
+	<key>CFBundleIconFile</key>
+	<string>generated-83085f9fd5198894cb5a7897c4b8a1371bd3ae22f14df0f7d13307dc4dae225c.icns</string>
+	<key>CFBundleIdentifier</key>
+	<string>code_craft_2025</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>code_craft_2025</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
